@@ -49,11 +49,23 @@
 #   2016-05-14  added heating-circuit handling for controller type: CTxyz/CRxyz/CWxyz
 #               added solar-message   handling for controller type: CTxyz/CRxyz/CWxyz
 #               correted names in doc: hc1_Trequested and hc1_mode_requested
-#   2017-02-26  Importend note:
+#   2019-01-05  Cxyz-controller handling added for RX and TX from/to heater-bus
+#               'ControllerName' attribute handling added.
+#               new MsgID handling for: 26,30,615,797,798 and Powerswitch Modul.
+#               Temperatur rangecheck modified for limit (0x7000) and value: -0.0.
+#               added 'hcx_Tflow_desired' and 'hcx_pump'.
+#               'sol_yield_last_hour' corrected, value devided by 10.
+#               example corrected 'eventMap' for 'attr Betriebsart.
+#               Html-documentation updated.
+###############################################################################
+#
+#    Importend note:
 #     This Release is NOT an official one and is only for testing-purposes.
+#
 #     If you have new test-results from your heater-system let us know.
 #       junky-zs at gmx dot de
 #
+###############################################################################
 
 
 
@@ -72,16 +84,42 @@
 # sol = solar
 # T   = temperatur
 
-#### examples for fhem.cfg and using heater-set functionality ####
+###############################################################################
+#### examples for fhem.cfg and using heater-set functionality #################
+###############################################################################
+#
+## Attribut for currently used heater-Controller
+# attr <tag> ControllerName <name>
+#  example: 
+#   attr Heizung ControllerName FR120   # Fxyz-controllertype
+#   or
+#   attr Heizung ControllerName CW400   # Cxyz-controllertype
+####
+#############################################################
+## define example for 'heating-mode' and Fxxy controller-type
 #
 # define Betriebsart dummy
-# attr Betriebsart eventMap auto:auto comfort:heizen eco:sparen frost:frost
+# attr Betriebsart eventMap auto:auto heizen:comfort sparen:eco frost:frost
 # attr Betriebsart room Heiz-System
 # attr Betriebsart webCmd auto:comfort:eco:frost
 # define notify_Betriebsart notify Betriebsart {\
 #  my $modus=Value("Betriebsart");; \
 #  {fhem("set Heizung hc1_mode_requested $modus")};; \
 # }
+#############################################################
+## define example for 'heating-mode' and Cxxy controller-type
+#
+# define Betriebsart dummy
+# attr Betriebsart eventMap auto:auto auto:comfort auto:eco auto:frost manual:manual
+# attr Betriebsart room Heiz-System
+# attr Betriebsart webCmd auto:manual
+# define notify_Betriebsart notify Betriebsart {\
+#  my $modus=Value("Betriebsart");; \
+#  {fhem("set Heizung hc1_mode_requested $modus")};; \
+# }
+#############################################################
+## define example for 'temperatur-niveau' and Fxxy or Cxyz controller-types
+#
 # define Heizen_Sollniveau dummy
 # attr Heizen_Sollniveau setList state:slider,10,0.5,30,1
 # attr Heizen_Sollniveau webCmd state
@@ -90,7 +128,7 @@
 #  my $value=Value("Heizen_Sollniveau");; \
 #  {fhem("set Heizung hc1_Trequested $value")};; \
 # }
-####
+###############################################################################
 #
 
 package main;
@@ -118,7 +156,10 @@ sub HEATRONIC_DecodeMsg_SOL($$$);
 sub HEATRONIC_CRCtest($$$);
 sub HEATRONIC_CRCget($);
 sub HEATRONIC_timeDiff($);
-sub HEATRONIC_msgID677($$$);
+sub HEATRONIC_msgID677($$$$);
+sub HEATRONIC_msgPowerSwitchModul($$$$$);
+sub HEATRONIC_msgID26($$$$);
+sub HEATRONIC_ControllerType($);
 
 my @crc_table = qw( 0x00 0x02 0x04 0x06 0x08 0x0a 0x0c 0x0e 0x10 0x12 0x14 0x16 0x18 0x1a 0x1c 0x1e 
                     0x20 0x22 0x24 0x26 0x28 0x2a 0x2c 0x2e 0x30 0x32 0x34 0x36 0x38 0x3a 0x3c 0x3e
@@ -152,12 +193,17 @@ my %HEATRONIC_sets = (
 );
  
 my %HEATRONIC_set_mode_requested = (
+  "manual"    => 0,
   "frost"     => 1,
   "eco"       => 2,
   "comfort"   => 3,
   "auto"      => 4
 );
 
+my %HEATRONIC_ControllerType_Value = (
+  "F" => 1,
+  "C" => 2
+);
 
 sub
 HEATRONIC_Initialize($)
@@ -182,6 +228,7 @@ HEATRONIC_Initialize($)
       ."interval_dhw_Tcylinder:0,15,30,60,300,600,900,1800,3600,7200,43200,86400 "
       ."minDiff_ch_Tflow_measured:0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0 "
       ."binary_operation:OR,AND "
+      ."ControllerName:0,1 "
       . $readingFnAttributes;
   
   # set option-list
@@ -189,8 +236,6 @@ HEATRONIC_Initialize($)
   $HEATRONIC_sets{"hc1_mode_requested"}{OPT} = ":$optionList";
 }
 
-# if fmt =~"m/_betriebsart$/"
-# 
 
 sub
 HEATRONIC_Define($$)
@@ -224,6 +269,8 @@ HEATRONIC_Define($$)
   $hash->{DeviceName} = $dev;
   
   $hash->{status}{FlagWritingSequence} = 0;
+
+  $hash->{status}{HT_mode_requested} = 255; # default to auto mode used for Cxyz-controller
   ####END####### Writing values to global hash ################################################################END#####
 
   my $ret = DevIo_OpenDev($hash,0,"HEATRONIC_DoInit");
@@ -282,7 +329,7 @@ HEATRONIC_Read($)
 
   my $x;
   my $value;
-  my $length;
+  my $length = 0;
   my $position = 0;
 
 #  $debug = AttrVal($name, "debug", 0);
@@ -323,10 +370,9 @@ HEATRONIC_Read($)
       else
       {
         Log3 $name, 3, "HEATRONIC error: Cannot handle message 'Request'";
-	Log3 $name, 3, substr($buffer,$position,$length*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
-        substr($buffer,$position,$length*2) = "";
+        Log3 $name, 3, substr($buffer,$position,$length*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
         $buffer = "";
-      }		
+      }
     }
   }
 
@@ -350,7 +396,7 @@ HEATRONIC_Read($)
         $value = HEATRONIC_DecodeMsg_CH1($hash,substr($buffer,$position,$length*2),$length);
         if (defined($value))
         {
-          # nicht alles löschen, da Länge kleiner
+          # nicht alles loeschen, da Laenge kleiner
           substr($buffer,$position,$length*2) = "";
         }
         else
@@ -358,13 +404,11 @@ HEATRONIC_Read($)
           Log3 $name, 3, "HEATRONIC error: Cannot handle message 'vessal data'";
           Log3 $name, 3, substr($buffer,$position,$length*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
           Log3 $name, 3, substr($buffer,$position,33*2) . HEATRONIC_CRCget(substr($buffer,$position,33*2));
-          substr($buffer,$position,$length*2) = "";
           $buffer = "";
         }
       }
       else
       {
-        substr($buffer,$position,$length*2) = "";
         $buffer = "";
       }
     }
@@ -390,7 +434,6 @@ HEATRONIC_Read($)
       {
         Log3 $name, 3, "HEATRONIC error: Cannot handle message 'heating circuit data'";
         Log3 $name, 3, substr($buffer,$position,$length*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
-        substr($buffer,$position,$length*2) = "";
         $buffer = "";
       }
     }
@@ -429,7 +472,7 @@ HEATRONIC_Read($)
       {
         Log3 $name, 3, "HEATRONIC error: Cannot handle message 'domestic hot water data'";
         Log3 $name, 3, substr($buffer,$position,25*2) . HEATRONIC_CRCget(substr($buffer,$position,25*2));
-        substr($buffer,$position,$length*2) = "";
+        $buffer = "";
       }
     }
   }
@@ -464,7 +507,6 @@ HEATRONIC_Read($)
       {
         Log3 $name, 3, "HEATRONIC error: Cannot handle message 'date / time data'";
         Log3 $name, 3, substr($buffer,$position,17*2) . HEATRONIC_CRCget(substr($buffer,$position,17*2));
-        substr($buffer,$position,$length*2) = "";
         $buffer = "";
       }
     }
@@ -477,6 +519,7 @@ HEATRONIC_Read($)
   elsif ($buffer =~ "9000ff0000d3")
   {
     $position = index($buffer,"9000ff0000d3");
+    $length = 11;
     if (length(substr($buffer,$position)) >= $length*2)
     {
       # from 23:00 to 05:00 first value, second value otherwise
@@ -491,24 +534,169 @@ HEATRONIC_Read($)
       #                 00       := Status letzte termische Desinfection im DHW1
       #
       # This values currently not decoded and are unused
-      $length = 11;
       $value = HEATRONIC_DecodeMsg_HC($hash,substr($buffer,$position,$length*2),$length);
       if (defined($value))
       {
         substr($buffer,$position,$length*2) = "";
-        $buffer = "";
       }
       else
       {
         Log3 $name, 3, "HEATRONIC error: Cannot handle message 'heating circuit data'";
         Log3 $name, 3, substr($buffer,$position,$length*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
-        substr($buffer,$position,$length*2) = "";
         $buffer = "";
       }
     }
   }
+  #######################################
+  ### message_ID: 677_0_0             ###
+  ###  RTSD hc1 or hc2                ###
+  ###   Room temperatur setpoint data ###
+  ###  (used by CTxyz/CRxyz/CWxyz)    ###
+  #######################################
+  elsif (($buffer =~ "9000ff0001a5") or ($buffer =~ "9800ff0001a5") or ($buffer =~ "9000ff0001a6") or ($buffer =~ "9800ff0001a6"))
+  {
+    my $foundstr = "9000ff0001a5";
+    my $hc_circuit = 1;
+    if ($buffer =~ "9800ff0001a5") 
+    {
+      $foundstr = "9800ff0001a5";
+    } 
+    elsif ($buffer =~ "9000ff0001a6") 
+    {
+      $foundstr = "9000ff0001a6";
+      $hc_circuit = 2;
+    } 
+    elsif ($buffer =~ "9800ff0001a6") 
+    {
+      $foundstr = "9800ff0001a6";
+      $hc_circuit = 2;
+    }
+    $position = index($buffer,$foundstr);
+    $length = 33; # length 10,12,30,32 or 33 Bytes <-- used with new controller-types: CTxyz/CRxyz/CWxyz
+    if (length(substr($buffer,$position)) >= $length*2)
+    {
+      $value = HEATRONIC_msgID677($hash,substr($buffer,$position,$length*2),$length,$hc_circuit);
+      if (!defined($value))
+      {
+        $length = 32;
+        $value = HEATRONIC_msgID677($hash,substr($buffer,$position,$length*2),$length,$hc_circuit);
+        if (!defined($value))
+        {
+          $length = 30;
+          $value = HEATRONIC_msgID677($hash,substr($buffer,$position,$length*2),$length,$hc_circuit);
+          if (!defined($value))
+          {
+            $length = 12;
+            $value = HEATRONIC_msgID677($hash,substr($buffer,$position,$length*2),$length,$hc_circuit);
+            if (!defined($value))
+            {
+                $length = 10;
+                $value = HEATRONIC_msgID677($hash,substr($buffer,$position,$length*2),$length,$hc_circuit);
+            }
+          }
+        }
+      }
+      if (defined($value))
+      {
+        # don't delete everything because of different lengths
+        substr($buffer,$position,$length*2) = "";
+      }
+      else
+      {
+        Log3 $name, 3, "HEATRONIC error: Cannot handle message 'controller data'";
+        Log3 $name, 3, substr($buffer,$position,33*2) . HEATRONIC_CRCget(substr($buffer,$position,33*2));
+        $buffer = "";
+      }
+    }
+  }
+  #######################################
+  ### message_ID: 615 & 797,798   ###
+  #######################################
+  elsif (($buffer =~ "9000ff000167") or ($buffer =~ "9000ff00021d") or ($buffer =~ "9000ff00021e"))
+  {
+    my $foundstr = "";
+    my $msgID=0;
+    my $searchstr = "9000ff00";
+       $length = 10;
 
-  # controller data (FW1xy / FW2xy)
+    if ($buffer =~ ($searchstr."0167")) {
+      # Floor dyring message
+      $msgID=615;
+      $foundstr = $searchstr."0167";
+      $length = 10;
+    }
+    if ($buffer =~ ($searchstr."021d")) {
+      # DHW1 extra message
+      $msgID=797;
+      $foundstr = $searchstr."021d";
+      $length = 12;
+    }
+    if ($buffer =~ ($searchstr."021e")) {
+      # DHW2 extra message
+      $msgID=798;
+      $foundstr = $searchstr."021e";
+      $length = 12;
+    }
+    $position = index($buffer,$foundstr);
+    if (length(substr($buffer,$position)) >= $length*2)
+    {
+      if ($msgID == 615) {
+        # message unused, nothing to do
+        $value = 1;
+      }
+      if ($msgID == 797) {
+        # message not yet unused, nothing to do
+        $value = 1;
+      }
+      if ($msgID == 798) {
+        # message not yet unused, nothing to do
+        $value = 1;
+      }
+      if (defined($value))
+      {
+        # don't delete everything because of different lengths
+        substr($buffer,$position,$length*2) = "";
+      }
+      else
+      {
+        Log3 $name, 3, "HEATRONIC error: Cannot handle message 'controller data'";
+        Log3 $name, 3, substr($buffer,$position,$length*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
+        $buffer = "";
+      }
+    }
+  }
+  ############################################
+  ### message_ID: 26_0_0                   ###
+  ### From Main-controller to heaterdevice ###
+  ############################################
+  elsif ($buffer =~ "90081a00")
+  {
+    my $foundstr = "90081a00";
+    my $hc_circuit = 1;
+
+    $position = index($buffer,$foundstr);
+    $length = 9;  # length 9 or 7 Bytes
+    if (length(substr($buffer,$position)) >= $length*2)
+    {
+      $value = HEATRONIC_msgID26($hash,substr($buffer,$position,$length*2),$length,$hc_circuit);
+      if (!defined($value))
+      {
+        $length = 7;
+        $value = HEATRONIC_msgID26($hash,substr($buffer,$position,$length*2),$length,$hc_circuit);
+      }
+      if (defined($value))
+      {
+        substr($buffer,$position,$length*2) = "";
+      }
+      else
+      {
+        Log3 $name, 3, "HEATRONIC error: Cannot handle message:".$foundstr;
+        Log3 $name, 3, substr($buffer,$position,$length*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
+        $buffer = "";
+      }
+    }
+  }
+  # controller data (Fxyz or Cxyz)
   elsif ($buffer =~ "9000ff00")
   {
     $position = index($buffer,"9000ff00");
@@ -545,68 +733,94 @@ HEATRONIC_Read($)
       {
         Log3 $name, 3, "HEATRONIC error: Cannot handle message 'controller data'";
         Log3 $name, 3, substr($buffer,$position,17*2) . HEATRONIC_CRCget(substr($buffer,$position,17*2));
-        substr($buffer,$position,$length*2) = "";
+        $buffer = "";
       }
     }
   }
-
-  #######################################
-  ### message_ID: 677_0_0             ###
-  ###  RTSD hc1                       ###
-  ###   Room temperatur setpoint data ###
-  ###  (used by CTxyz/CRxyz/CWxyz)    ###
-  #######################################
-  elsif (($buffer =~ "9000ff0001a5") or ($buffer =~ "9800ff0001a5"))
+  # Telegramm: Lastschaltmodul #1 or #2 (IPM/MM)
+  elsif (($buffer =~ "a000ff00") or ($buffer =~ "a100ff00"))
   {
-    my $foundstr = "9000ff0001a5";
-    if ($buffer =~ "9800ff0001a5") 
-    {
-      $foundstr = "9800ff0001a5";
+    my $foundstr = "";
+    my $hc_circuit = 1;
+    my $msgID=0;
+    my $searchstr = "a000ff00";
+    $length = 4;
+
+    if ($buffer =~ $searchstr) {
+      $hc_circuit = 1;
+    } elsif ($buffer =~ "a100ff00") {
+        $searchstr = "a100ff00";
+        $hc_circuit = 2;
+    }
+    if ($buffer =~ ($searchstr."000c")) {
+      # message_ID: 268_0_0
+      $msgID=268;
+      $foundstr = ($searchstr."000c");
+      $length = 14;
+    }
+    if ($buffer =~ ($searchstr."0155")) {
+      # message_ID: 597_0_0
+      $msgID=597;
+      $foundstr = ($searchstr."0155");
+      $length = 9;
+    }
+    if ($buffer =~ ($searchstr."01d7")) {
+      # message_ID: 727_0_0
+      $msgID=727;
+      $foundstr = ($searchstr."01d7");
+      $length = 17;
+    }
+    if ($buffer =~ ($searchstr."01d8")) {
+      # message_ID: 728_0_0
+      $msgID=728;
+      $foundstr = ($searchstr."01d8");
+      $length = 17;
     }
     $position = index($buffer,$foundstr);
-    $length = 33; # length 10,12,30 or 33 Bytes <-- used with new controller-types: CTxyz/CRxyz/CWxyz
     if (length(substr($buffer,$position)) >= $length*2)
     {
-      $value = HEATRONIC_msgID677($hash,substr($buffer,$position,$length*2),$length);
-      if (!defined($value))
-      {
-        $length = 30;
-        $value = HEATRONIC_msgID677($hash,substr($buffer,$position,$length*2),$length);
-        if (!defined($value))
-        {
-          $length = 12;
-          $value = HEATRONIC_msgID677($hash,substr($buffer,$position,$length*2),$length);
-          if (!defined($value))
-          {
-            $length = 10;
-            $value = HEATRONIC_msgID677($hash,substr($buffer,$position,$length*2),$length);
-          }
-        }
-      }
+      $value = HEATRONIC_msgPowerSwitchModul($hash,substr($buffer,$position,$length*2),$length,$hc_circuit,$msgID);
       if (defined($value))
       {
-        # don't delete everything because of different lengths
+        substr($buffer,$position,$length*2) = "";
+      } else {
+        Log3 $name, 3, "HEATRONIC error: Cannot handle message:".$foundstr;
+        Log3 $name, 3, substr($buffer,$position,17*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
+        $buffer = "";
+      }
+    }
+  }
+  ##################################
+  ### message_ID: 30_0_0         ###
+  ### IPM/MM Msg to heaterdevice ###
+  ###  hydraulic switch tempera  ###
+  ##################################
+  elsif (($buffer =~ "a0081e00") or ($buffer =~ "a1081e00"))
+  {
+    my $foundstr = "a0081e00";
+    if ($buffer =~ "a1081e00") {
+        $foundstr = "a1081e00";
+    }
+    $position = index($buffer,$foundstr);
+    $length = 8;
+    if (length(substr($buffer,$position)) >= $length*2)
+    {
+      if (defined(HEATRONIC_CRCtest($hash,$position, $length)))
+      {
+        my $ch_Thdrylic_switch  = hex(substr($position,4*2,4))/10;
+        readingsBeginUpdate($hash);
+        readingsBulkUpdate($hash, "ch_Thdrylic_switch", ($ch_Thdrylic_switch*10 >= 0x7000) ? "-0.0" : sprintf("%.1f", $ch_Thdrylic_switch));
+        readingsEndUpdate($hash,1);
         substr($buffer,$position,$length*2) = "";
       }
       else
       {
-        Log3 $name, 3, "HEATRONIC error: Cannot handle message 'controller data'";
-        Log3 $name, 3, substr($buffer,$position,33*2) . HEATRONIC_CRCget(substr($buffer,$position,33*2));
-        substr($buffer,$position,$length*2) = "";
+        Log3 $name, 3, "HEATRONIC error: Cannot handle message:".$foundstr;
+        Log3 $name, 3, substr($buffer,$position,$length*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
+        $buffer = "";
       }
     }
   }
- 
-  # Telegramm: Lastschaltmodul #1 (IPM)
-  elsif ($buffer =~ "a000ff00")
-  {
-  }
-
-  # Telegramm: Lastschaltmodul #2 (IPM)
-  elsif ($buffer =~ "a100ff00")
-  {
-  }
-
   ##################################  solar data (ISM1/2)  ###################
   ##################################
   ### message_ID: 259_0_0        ###
@@ -629,7 +843,6 @@ HEATRONIC_Read($)
       {
         Log3 $name, 3, "HEATRONIC error: Cannot handle message 'solar data'";
         Log3 $name, 3, substr($buffer,$position,$length*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
-        substr($buffer,$position,$length*2) = "";
         $buffer = "";
       }
     }
@@ -656,13 +869,11 @@ HEATRONIC_Read($)
       if (defined($value))
       {
         substr($buffer,$position,$length*2) = "";
-        $buffer = "";
       }
       else
       {
         Log3 $name, 3, "HEATRONIC error: Cannot handle message 'solar data'";
         Log3 $name, 3, substr($buffer,$position,35*2) . HEATRONIC_CRCget(substr($buffer,$position,35*2));
-        substr($buffer,$position,$length*2) = "";
         $buffer = "";
       }
     }
@@ -690,13 +901,11 @@ HEATRONIC_Read($)
       if (defined($value))
       {
         substr($buffer,$position,$length*2) = "";
-        $buffer = "";
       }
       else
       {
         Log3 $name, 3, "HEATRONIC error: Cannot handle message 'solar data'";
         Log3 $name, 3, substr($buffer,$position,32*2) . HEATRONIC_CRCget(substr($buffer,$position,32*2));
-        substr($buffer,$position,$length*2) = "";
         $buffer = "";
       }
     }
@@ -717,13 +926,11 @@ HEATRONIC_Read($)
       if (defined($value))
       {
         substr($buffer,$position,$length*2) = "";
-        $buffer = "";
       }
       else
       {
         Log3 $name, 3, "HEATRONIC error: Cannot handle message 'solar data'";
         Log3 $name, 3, substr($buffer,$position,$length*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
-        substr($buffer,$position,$length*2) = "";
         $buffer = "";
       }
     }
@@ -801,6 +1008,21 @@ HEATRONIC_Set($@)
   }
 }
 
+sub
+HEATRONIC_ControllerType($)
+{
+  my ($hash) = @_;
+  my $name = $hash->{NAME};
+  my $ControllerName = AttrVal($name, "ControllerName", 0);
+  my $ControllerType = $HEATRONIC_ControllerType_Value{'F'};
+  if ($ControllerName =~ "C") {
+    $ControllerType = $HEATRONIC_ControllerType_Value{'C'};
+  }
+  # uncomment for test only #
+  # Log3 $name, 3, "HEATRONIC_ControllerType:".$ControllerType;
+
+  return $ControllerType;
+}
 
 
 sub
@@ -808,6 +1030,8 @@ HEATRONIC_WriteHC_Trequested($$)
 {
   my ($hash, $trequested) = @_;
   my $name = $hash->{NAME};
+  my $block1 = "";
+  my $block2 = "";
 
   if (!defined($hash)) {
     return undef;
@@ -820,20 +1044,51 @@ HEATRONIC_WriteHC_Trequested($$)
 
   $hash->{status}{FlagWritingSequence} = 1;
 
-  ## send 1. netcom-bytes to 'ht_pitiny' | 'ht_piduino' (ht_transceiver)
+  # Cmd's are a set of header + data
+  # send bytes to 'ht_pitiny' | 'ht_piduino' (ht_transceiver)
   #   header=  '#',   <length>  ,'!' ,'S' ,0x11
   #   header= 0x23,(len(data)+3),0x21,0x53,0x11
-  #   data  = 0x10,0xff,0x11,0x00,0x65,tsoll
-  #   block=header+data
-  my $block1 = "230921531110FF110065" . sprintf("%02x",$trequested);
-  DevIo_SimpleWrite($hash, $block1, 1);
 
-  ## send 2. netcom-bytes to 'ht_pitiny' | 'ht_piduino' (ht_transceiver)
-  #   header= 0x23,(len(data)+3),0x21,0x53,0x11
-  #   data  = 0x10,0xff,0x07,0x00,0x79,tsoll
-  #   block=header+data
-  my $block2 = "230921531110FF070079" . sprintf("%02x",$trequested);
-  DevIo_SimpleWrite($hash, $block2, 1);
+  my $CType = HEATRONIC_ControllerType($hash);
+  if ($CType == $HEATRONIC_ControllerType_Value{'C'}) {
+    #### Command for Cxyz-controller-type ####
+    ## send 1. bytes to target (10)hex := Main Controller
+    #   data  = 0x10,0xff,offset,0x01,0xb9,tsoll
+    #            offset :=  8 -> Automatic mode
+    #            offset := 10 -> Manual    mode
+    #   block = header+data
+    my $msg_offset = 8; # offset for auto mode
+    if ($hash->{status}{HT_mode_requested} == 0) {
+      $msg_offset = 10; # offset for manual mode
+    }
+
+    $block1 = "230921531110FF".sprintf("%02x",$msg_offset)."01b9".sprintf("%02x",$trequested);
+    DevIo_SimpleWrite($hash, $block1, 1);
+
+    ## send 2. bytes to target (18)hex := Remote Controller
+    #    this is forced, also if isn't any Remote Controller in system
+    #   data  = 0x18,0xff,0x08,0x01,0xb9,tsoll
+    #   block = header+data
+    $block2 = "230921531118FF".sprintf("%02x",$msg_offset)."01b9".sprintf("%02x",$trequested);
+    DevIo_SimpleWrite($hash, $block1, 1);
+  } else 
+  {
+    #### Command for Fxyz-controller-type ####
+    ## send 1. bytes to target (10)hex := Main Controller
+    #   data  = 0x10,0xff,0x11,0x00,0x65,tsoll
+    #   block = header+data
+    $block1 = "230921531110FF110065" . sprintf("%02x",$trequested);
+    DevIo_SimpleWrite($hash, $block1, 1);
+
+    ## send 2. bytes to target (10)hex := Main Controller
+    #   data  = 0x10,0xff,0x07,0x00,0x79,tsoll
+    #   block = header+data
+    $block2 = "230921531110FF070079" . sprintf("%02x",$trequested);
+    DevIo_SimpleWrite($hash, $block2, 1);
+  }
+  # uncomment for debugging
+  # Log3 $name, 3, "HEATRONIC_WriteHC_Trequested block1:".$block1;
+  # Log3 $name, 3, "HEATRONIC_WriteHC_Trequested block2:".$block2;
 
   $hash->{status}{FlagWritingSequence} = 0;
   return 1;
@@ -857,21 +1112,48 @@ HEATRONIC_WriteHC_mode($$)
   }
   $hash->{status}{FlagWritingSequence} = 1;
 
-  ## send 1. netcom-bytes to 'ht_pitiny' | 'ht_piduino' (ht_transceiver)
+  # Cmd's are a set of header + data
   #   header=  '#',   <length>  ,'!' ,'S' ,0x11
   #   header= 0x23,(len(data)+3),0x21,0x53,0x11
-  #   data  = 0x10,0xff,0x0e,0x00,0x65,mode_requested
-  #   block=header+data
-  my $block1 = "230921531110FF0E0065" . sprintf("%02x",$mode_requested);
-  DevIo_SimpleWrite($hash, $block1, 1);
 
-  ## send 2. netcom-bytes to 'ht_pitiny' | 'ht_piduino' (ht_transceiver)
-  #   header= 0x23,(len(data)+3),0x21,0x53,0x11
-  #   data  = 0x10,0xff,0x04,0x00,0x79,mode_requested
-  #   block=header+data
-  my $block2 = "230921531110FF040079" . sprintf("%02x",$mode_requested);
-  DevIo_SimpleWrite($hash, $block2, 1);
+  my $CType = HEATRONIC_ControllerType($hash);
+  if ($CType == $HEATRONIC_ControllerType_Value{'C'}) {
+    #### Command for Cxyz-controller-type ####
+    ## send 1. bytes to 'ht_pitiny' | 'ht_piduino' (ht_transceiver)
+    #   data  = 0x10,0xff,0x00,0x01,0xb9,mode_requested
+    #   block = header+data
+    if ($mode_requested > 0) {
+      # if not 'manual' = 0, then force it to 'auto'
+      $mode_requested = 255;
+    }
+    my $block1 = "230921531110FF0001b9" . sprintf("%02x",$mode_requested);
+    DevIo_SimpleWrite($hash, $block1, 1);
 
+    $hash->{status}{HT_mode_requested} = $mode_requested;
+
+    # uncomment for debugging
+    # Log3 $name, 3, "HEATRONIC_WriteHC_mode block1:".$block1;
+  } else 
+  {
+    #### Command for Fxyz-controller-type ####
+    ## send 1. bytes to 'ht_pitiny' | 'ht_piduino' (ht_transceiver)
+    #   data  = 0x10,0xff,0x0e,0x00,0x65,mode_requested
+    #   block = header+data
+    my $block1 = "230921531110FF0E0065" . sprintf("%02x",$mode_requested);
+    DevIo_SimpleWrite($hash, $block1, 1);
+
+    ## send 2. bytes to 'ht_pitiny' | 'ht_piduino' (ht_transceiver)
+    #   data  = 0x10,0xff,0x04,0x00,0x79,mode_requested
+    #   block=header+data
+    my $block2 = "230921531110FF040079" . sprintf("%02x",$mode_requested);
+    DevIo_SimpleWrite($hash, $block2, 1);
+
+    $hash->{status}{HT_mode_requested} = $mode_requested;
+
+    # uncomment for debugging
+    # Log3 $name, 3, "HEATRONIC_WriteHC_mode block1:".$block1;
+    # Log3 $name, 3, "HEATRONIC_WriteHC_mode block2:".$block2;
+  }
   $hash->{status}{FlagWritingSequence} = 0;
   return 1;
 }
@@ -897,7 +1179,7 @@ HEATRONIC_DecodeMsg_CH1($$$)
     my $ch_pump_circulation = (hex(substr($string,11*2,2)) & 0x80) ? 1 : 0;
     my $ch_burner_fan       = (hex(substr($string,11*2,2)) & 0x01) ? 1 : 0;
     my $ch_mode             = (hex(substr($string,9*2,2)) & 0x03);
-	my $ch_code             = hex(substr($string,24*2,4));
+    my $ch_code             = hex(substr($string,24*2,4));
     my $ch_22_num           = hex(substr($string,22*2,2));
     my $ch_23_num           = hex(substr($string,23*2,2));
     my $ch_22_char          = ($ch_22_num == 0) ? "0" : chr($ch_22_num);
@@ -930,8 +1212,8 @@ HEATRONIC_DecodeMsg_CH1($$$)
       }
     }
 
-    readingsBulkUpdate($hash, "ch_Treturn", ($ch_Treturn*10 == 0x8000) ? "0.0" : sprintf("%.1f",$ch_Treturn));
-    readingsBulkUpdate($hash, "ch_Tmixer", ($ch_Tmixer*10 == 0x8000) ? "0.0" : sprintf("%.1f", $ch_Tmixer));
+    readingsBulkUpdate($hash, "ch_Treturn", ($ch_Treturn*10 >= 0x7000) ? "-0.0" : sprintf("%.1f",$ch_Treturn));
+    readingsBulkUpdate($hash, "ch_Tmixer", ($ch_Tmixer*10 >= 0x7000) ? "-0.0" : sprintf("%.1f", $ch_Tmixer));
     readingsBulkUpdate($hash, "ch_mode", $ch_mode);
     readingsBulkUpdate($hash, "ch_burner_fan", $ch_burner_fan);
     readingsBulkUpdate($hash, "ch_burner_operation", $ch_burner_operation);
@@ -939,7 +1221,7 @@ HEATRONIC_DecodeMsg_CH1($$$)
     readingsBulkUpdate($hash, "ch_pump_cylinder", $ch_pump_cylinder);
     readingsBulkUpdate($hash, "ch_pump_circulation", $ch_pump_circulation);
     readingsBulkUpdate($hash, "ch_burner_power", $ch_burner_power);
-	readingsBulkUpdate($hash, "ch_code", $ch_code);
+    readingsBulkUpdate($hash, "ch_code", $ch_code);
     readingsBulkUpdate($hash, "ch_error", $ch_error);
     readingsEndUpdate($hash,1);
 
@@ -989,12 +1271,127 @@ HEATRONIC_DecodeMsg_CH2($$$)
 }
 
 sub
-HEATRONIC_msgID677($$$)
+HEATRONIC_msgPowerSwitchModul($$$$$)
 {
-  my ($hash,$string,$length) = @_;
+  my ($hash,$string,$length,$circuit,$msgID) = @_;
+  my $name = $hash->{NAME};
+  my $hc_Tflow_desired;
+  my $hc_Tflow_mixer;
+  my $hc_mixer_position;
+  my $hc_pump;
+
+  my $prefix = "hc" . $circuit . "_";
+  if (defined(HEATRONIC_CRCtest($hash,$string, $length)))
+  {
+    readingsBeginUpdate($hash);
+    # MsgID: 268 ##########################
+    if ($msgID == 268) {
+      if ($length >= 11)
+      {
+        $hc_Tflow_desired = hex(substr($string,11*2,2));
+        readingsBulkUpdate($hash, $prefix . "Tflow_desired", $hc_Tflow_desired);
+      }
+      if ($length >= 9)
+      {
+        $hc_Tflow_mixer = (hex(substr($string,9*2,4)) / 10 );
+        readingsBulkUpdate($hash, $prefix . "Tflow_mixer", ($hc_Tflow_mixer*10 >= 0x7000) ? "-0.0" : sprintf("%.1f", $hc_Tflow_mixer));
+      }
+      if ($length >= 8)
+      {
+        $hc_mixer_position = hex(substr($string,8*2,2));
+        readingsBulkUpdate($hash, $prefix . "mixerposition", $hc_mixer_position);
+      }
+      if ($length >= 7)
+      {
+        # status heating-circuit (bit1(LSBit) - to bit8(MSBit))
+        #  bit1 := status heating-circuit pump in this circuit
+        #  bit2 := status relay for mixermotor
+        #  bit3 := mixervalve closed
+        $hc_pump = (hex(substr($string,7*2,2)) & 0x01) ? 1 : 0;
+        readingsBulkUpdate($hash, $prefix . "pump", $hc_pump);
+      }
+    } # MsgID: 268 ##########################
+
+    # MsgID: 597 ##########################
+    if ($msgID == 597) {
+      # still unknown message
+    } # MsgID: 597 ##########################
+
+    # MsgID: 727 or 728 ###################
+    if (($msgID == 727) or ($msgID == 728)){
+      if ($length >= 11)
+      {
+        $hc_Tflow_desired = hex(substr($string,11*2,2));
+        readingsBulkUpdate($hash, $prefix . "Tflow_desired", $hc_Tflow_desired);
+      }
+      if ($length >= 9)
+      {
+        $hc_Tflow_mixer = (hex(substr($string,9*2,4)) / 10 );
+        readingsBulkUpdate($hash, $prefix . "Tflow_mixer", ($hc_Tflow_mixer*10 >= 0x7000) ? "-0.0" : sprintf("%.1f", $hc_Tflow_mixer));
+      }
+      if ($length >= 8)
+      {
+        $hc_mixer_position = hex(substr($string,8*2,2));
+        readingsBulkUpdate($hash, $prefix . "mixerposition", $hc_mixer_position);
+      }
+      if ($length >= 6)
+      {
+        $hc_pump = hex(substr($string,6*2,2));
+        readingsBulkUpdate($hash, $prefix . "pump", $hc_pump);
+      }
+    } # MsgID: 727 or 728 ###################
+    readingsEndUpdate($hash,1);
+    return 1;
+  }
+  else 
+  { 
+    return undef;
+  }
+}
+
+sub
+HEATRONIC_msgID26($$$$)
+{
+  my ($hash,$string,$length,$circuit) = @_;
   my $name = $hash->{NAME};
 
-  my $prefix = "hc1_";
+  my $prefix = "hc" . $circuit . "_";
+  my $hc_Tflow_desired;
+  my $hc_pump = 0;
+  
+  if (defined(HEATRONIC_CRCtest($hash,$string, $length)))
+  { 
+    readingsBeginUpdate($hash);
+    if ($length >= 6)
+    {
+      $hc_Tflow_desired   = hex(substr($string,4*2,2));
+      readingsBulkUpdate($hash, $prefix . "Tflow_desired", sprintf("%.1f",$hc_Tflow_desired));
+    }
+    if ($length >= 9)
+    {
+      $hc_pump   = hex(substr($string,5*2,2));
+      $hc_pump  += hex(substr($string,6*2,2));
+      if ($hc_pump > 0) {
+        $hc_pump = 1;
+      }
+      readingsBulkUpdate($hash, $prefix . "pump", $hc_pump);
+    }
+    readingsEndUpdate($hash,1);
+    return 1;
+  }
+  else 
+  { 
+    return undef;
+  }
+}
+
+sub
+HEATRONIC_msgID677($$$$)
+{
+  my ($hash,$string,$length,$circuit) = @_;
+  my $name = $hash->{NAME};
+
+  my $prefix = "hc" . $circuit . "_";
   my $hc_Tdesired;
   my $hc_Tmeasured;
   my $hc_mode = 0;
@@ -1015,7 +1412,7 @@ HEATRONIC_msgID677($$$)
     if ($length >= 10)
     {
       $hc_Tmeasured  = hex(substr($string,6*2,4))/10;
-      readingsBulkUpdate($hash, $prefix . "Tmeasured", sprintf("%.1f",$hc_Tmeasured));
+      readingsBulkUpdate($hash, $prefix . "Tmeasured", ($hc_Tmeasured*10 >= 0x7000) ? "-0.0" : sprintf("%.1f", $hc_Tmeasured));
     }
     readingsEndUpdate($hash,1);
     return 1;
@@ -1118,7 +1515,7 @@ HEATRONIC_DecodeMsg_DHW($$$)
     {
       if (($interval_dhw_Tmeasured > 0) && (HEATRONIC_timeDiff($dhw_TmeasuredTS) >= $interval_dhw_Tmeasured) || $interval_dhw_Tmeasured == -1)
       {
-        readingsBulkUpdate($hash, "dhw_Tmeasured", sprintf("%.1f",$dhw_Tmeasured));
+        readingsBulkUpdate($hash, "dhw_Tmeasured", ($dhw_Tmeasured*10 >= 0x7000) ? "-0.0" : sprintf("%.1f", $dhw_Tmeasured));
       }
     }
     
@@ -1131,7 +1528,7 @@ HEATRONIC_DecodeMsg_DHW($$$)
     {
       if (($interval_dhw_Tcylinder > 0) && (HEATRONIC_timeDiff($dhw_TcylinderTS) >= $interval_dhw_Tcylinder) || $interval_dhw_Tcylinder == -1)
       {
-        readingsBulkUpdate($hash, "dhw_Tcylinder", sprintf("%.1f",$dhw_Tcylinder));
+        readingsBulkUpdate($hash, "dhw_Tcylinder", ($dhw_Tcylinder*10 >= 0x7000) ? "-0.0" : sprintf("%.1f", $dhw_Tcylinder));
       }
     }
     
@@ -1233,7 +1630,8 @@ HEATRONIC_DecodeMsg_SOL($$$)
       $sol_Tcylinder_bottom = hex(substr($string,12*2,4))/10;	
     
       my $sol_pump            = (hex(substr($string,14*2,2)) & 0x01) ? 1 : 0;
-      my $sol_yield_last_hour = hex(substr($string,8*2,4));
+      my $sol_yield_last_hour = hex(substr($string,8*2,4))/10;
+
       my $sol_yield_2         = hex(substr($string,6*2,4));
       my $sol_runtime         = hex(substr($string,17*2,4));
 
@@ -1306,7 +1704,7 @@ HEATRONIC_DecodeMsg_SOL($$$)
     elsif ((hex(substr($string,4*2,2)) == 2) and (hex(substr($string,5*2,2)) == 0x8e))
     {
 
-      my $sol_yield_last_hour = hex(substr($string,6*2,8));
+      my $sol_yield_last_hour = hex(substr($string,6*2,8))/10;
       readingsBeginUpdate($hash);
       readingsBulkUpdate($hash, "sol_yield_last_hour", $sol_yield_last_hour);
       readingsEndUpdate($hash,1);
@@ -1389,7 +1787,7 @@ HEATRONIC_timeDiff($) {
 	 <br/><br/>
 	 <a name="HEATRONIC_Define"></a>
      <B>Define:</B><br/>
-	 <ul><code>define &lt;name&gt; HEATRONIC &lt;serial-device | &lt;proxy-server IP-address:port&gt;</code>
+	 <ul><code>define &lt;name&gt; HEATRONIC &lt;serial-device | &lt;proxy-server IP-address:port&gt;</code><br/><br/>
 	 
 	 <B>Example for serial-device:</B></br>
 	 <ul>
@@ -1411,13 +1809,19 @@ HEATRONIC_timeDiff($) {
           sets the 'heating' temperature-niveau for heating circuit 1 (permanent)<br/>
           0.5 celsius resolution - temperature between 10 and 30 celsius
         </li>
-        <li>hc1_mode_requested [ auto | comfort | eco | frost ]<br>
+        <li>hc1_mode_requested [ auto | comfort | eco | frost ] (for Fxyz controller)<br>
           sets the working mode for heating circuit 1<br>
           <ul>
             <li>auto   : the timer program is active and the summer configuration is in effect</li>
             <li>comfort: manual by 'comfort' working mode, no timer program is in effect</li>
             <li>eco    : manual by 'eco' working mode, no timer program is in effect</li>
             <li>frost  : manual by 'frost'  working mode, no timer program is in effect</li>
+          </ul></li>
+        <li>hc1_mode_requested [ auto | manual ] (for Cxyz controller)<br>
+          sets the working mode for heating circuit 1<br>
+          <ul>
+            <li>auto   : the timer program is active and the summer configuration is in effect</li>
+            <li>manual : manual working mode, no timer program is in effect</li>
           </ul></li>
       </ul><br/>
       Examples:
@@ -1434,6 +1838,9 @@ HEATRONIC_timeDiff($) {
         </li><br/>
         <li><B>minDiff_ch_Tflow_measured</B><br/>
           minimal difference (in degrees, e.g. 0.2) to update the corresponding values
+        </li><br/>
+        <li><B>ControllerName</B><br/>
+          Controller Modulname of heater-system (e.g. FR120 FW200 CW100 CW400)
         </li><br/>
      </ul>
    
@@ -1516,7 +1923,12 @@ HEATRONIC_timeDiff($) {
 	     <li><B>hc1_Tmode .. hc4_Tmode</B><br/>
 		   operating mode for heating circuit 1-4
 		 </li><br/>
-
+	     <li><B>hc1_Tflow_desired .. hc2_Tflow_desired</B><br/>
+		   current desired flow-temperatur for heating circuit 1-2
+		 </li><br/>
+	     <li><B>hc1_pump .. hc2_pump</B><br/>
+		   status of circuitpump for heating circuit 1-2
+		 </li><br/>
 	     <li><B>dhw_Tdesired</B><br/>
 		   required domestic hot water temperature
 		 </li><br/>
@@ -1582,13 +1994,19 @@ HEATRONIC_timeDiff($) {
           Setzt das 'Heizen' Temperatur-Niveau f&uuml;r Heizkreis 1 (permanent)<br>
           Aufl&ouml;sung 0.5 Celsius, Bereich: 10 bis 30 Celsius
         </li>
-        <li>hc1_mode_requested [ auto | comfort | eco | frost ]<br>
-          Setzt die Betriebsart des Heizkreises 1<br>
+        <li>hc1_mode_requested [ auto | comfort | eco | frost ] (Fxyz Regler)<br>
+          Setzt die Betriebsart des Heizkreises 1 bei Fxyz Reglern<br>
           <ul>
             <li>auto   : Das Timerprogramm und die Sommerzeit-Umschaltung sind aktiv </li>
             <li>comfort: Manueller 'comfort' Mode, Timerprogramm deaktiv</li>
             <li>eco    : Manueller 'eco' Mode, Timerprogramm deaktiv</li>
             <li>frost  : Manueller 'frost'  Mode, Timerprogramm deaktiv</li>
+          </ul></li>
+        <li>hc1_mode_requested [ auto | manual ] (Cxyz Regler)<br>
+          Setzt die Betriebsart des Heizkreises 1 bei Cxyz Reglern<br>
+          <ul>
+            <li>auto   : Das Timerprogramm und die Sommerzeit-Umschaltung sind aktiv </li>
+            <li>manual : Manueller Mode, Timerprogramm deaktiv</li>
           </ul></li>
       </ul>
       <br>
@@ -1608,6 +2026,9 @@ HEATRONIC_timeDiff($) {
         </li><br/>
         <li><B>minDiff_ch_Tflow_measured</B><br/>
           Minimaldifferenz (in Grad, z.B. 0.2) zum Update der entsprechenden Werte
+        </li><br/>
+        <li><B>ControllerName</B><br/>
+          Controller Modulname des Heizung-Systems (z.B. FR120 FW200 CW100 CW400)
         </li><br/>
      </ul>
 	 
@@ -1690,7 +2111,12 @@ HEATRONIC_timeDiff($) {
 	     <li><B>hc1_Tmode .. hc4_Tmode</B><br/>
 		   Betriebsmodus Heizkreis 1-4
 		 </li><br/>
-
+	     <li><B>hc1_Tflow_desired .. hc2_Tflow_desired</B><br/>
+		   aktuell ben&ouml;tigte Vorlauf-Temperatur Heizkreis 1-2
+		 </li><br/>
+	     <li><B>hc1_pump .. hc2_pump</B><br/>
+		   Status der Heizkreis-Pumpe Heizkreis 1-2
+		 </li><br/>
 	     <li><B>dhw_Tdesired</B><br/>
 		   ben&ouml;tigte Warmwasser-Temperatur
 		 </li><br/>
