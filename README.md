@@ -40,7 +40,7 @@ To get and test new features, the pre-release in this repository will help you.
 - restart the fhem-server with the web-interface button *restart*.
 
 ## Changelog
-### 2019-01-05
+### 2019-01-07
 - Updated *Cxyz-Controller* handling for decoding messages.
 
 - Added new functions to send commands to *Cxyz-Controller* and heater-bus
@@ -55,6 +55,8 @@ To get and test new features, the pre-release in this repository will help you.
 - Correction of *sol_yield_last_hour*, value devided by 10.
 
 - corrected *attr Betriebsart eventMap*
+
+- Added new logitem: *ch_Thdrylic_switch*.
 
 - Html-documentation updated.
 
