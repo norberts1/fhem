@@ -49,14 +49,14 @@
 #   2016-05-14  added heating-circuit handling for controller type: CTxyz/CRxyz/CWxyz
 #               added solar-message   handling for controller type: CTxyz/CRxyz/CWxyz
 #               correted names in doc: hc1_Trequested and hc1_mode_requested
-#   2019-01-05  Cxyz-controller handling added for RX and TX from/to heater-bus
+#   2019-01-07  Cxyz-controller handling added for RX and TX from/to heater-bus.
 #               'ControllerName' attribute handling added.
 #               new MsgID handling for: 26,30,615,797,798 and Powerswitch Modul.
 #               Temperatur rangecheck modified for limit (0x7000) and value: -0.0.
 #               added 'hcx_Tflow_desired' and 'hcx_pump'.
-#               'sol_yield_last_hour' corrected, value devided by 10.
+#               'sol_yield_last_hour' corrected, value now devided by 10.
 #               example corrected 'eventMap' for 'attr Betriebsart.
-#               Html-documentation updated.
+#               Html-documentation updated, 'ch_Thdrylic_switch' added.
 ###############################################################################
 #
 #    Importend note:
@@ -159,6 +159,7 @@ sub HEATRONIC_timeDiff($);
 sub HEATRONIC_msgID677($$$$);
 sub HEATRONIC_msgPowerSwitchModul($$$$$);
 sub HEATRONIC_msgID26($$$$);
+sub HEATRONIC_msgID30($$$);
 sub HEATRONIC_ControllerType($);
 
 my @crc_table = qw( 0x00 0x02 0x04 0x06 0x08 0x0a 0x0c 0x0e 0x10 0x12 0x14 0x16 0x18 0x1a 0x1c 0x1e 
@@ -805,16 +806,11 @@ HEATRONIC_Read($)
     $length = 8;
     if (length(substr($buffer,$position)) >= $length*2)
     {
-      if (defined(HEATRONIC_CRCtest($hash,$position, $length)))
+      $value = HEATRONIC_msgID30($hash,substr($buffer,$position,$length*2),$length);
+      if (defined($value))
       {
-        my $ch_Thdrylic_switch  = hex(substr($position,4*2,4))/10;
-        readingsBeginUpdate($hash);
-        readingsBulkUpdate($hash, "ch_Thdrylic_switch", ($ch_Thdrylic_switch*10 >= 0x7000) ? "-0.0" : sprintf("%.1f", $ch_Thdrylic_switch));
-        readingsEndUpdate($hash,1);
         substr($buffer,$position,$length*2) = "";
-      }
-      else
-      {
+      } else {
         Log3 $name, 3, "HEATRONIC error: Cannot handle message:".$foundstr;
         Log3 $name, 3, substr($buffer,$position,$length*2) . HEATRONIC_CRCget(substr($buffer,$position,$length*2));
         $buffer = "";
@@ -1386,6 +1382,26 @@ HEATRONIC_msgID26($$$$)
 }
 
 sub
+HEATRONIC_msgID30($$$)
+{
+  my ($hash,$string,$length) = @_;
+  my $name = $hash->{NAME};
+
+  if (defined(HEATRONIC_CRCtest($hash,$string, $length)))
+  { 
+    my $ch_Thdrylic_switch  = hex(substr($string,4*2,4))/10;
+    readingsBeginUpdate($hash);
+    readingsBulkUpdate($hash, "ch_Thdrylic_switch", ($ch_Thdrylic_switch*10 >= 0x7000) ? "-0.0" : sprintf("%.1f", $ch_Thdrylic_switch));
+    readingsEndUpdate($hash,1);
+    return 1;
+  }
+  else 
+  { 
+    return undef;
+  }
+}
+
+sub
 HEATRONIC_msgID677($$$$)
 {
   my ($hash,$string,$length,$circuit) = @_;
@@ -1864,7 +1880,7 @@ HEATRONIC_timeDiff($) {
 		 <li><B>ch_code</B><br/>
 		   current operation code or extended error code (see manual of boiler)
 		 </li><br/>
-		 <li><B>ch_code</B><br/>
+		 <li><B>ch_error</B><br/>
 		   error code (see manual of boiler)
 		 </li><br/>
 	     <li><B>ch_burner_fan</B><br/>
@@ -1913,6 +1929,10 @@ HEATRONIC_timeDiff($) {
 		 <li><B>ch_time</B><br/>
 		   system time of boiler
 		 </li><br/>
+	     <li><B>ch_Thdrylic_switch</B><br/>
+		   temperature at hydraulic switch (if available)
+		 </li><br/>
+
 		 
 	     <li><B>hc1_Tdesired .. hc4_Tdesired</B><br/>
 		   required room temperature for heating circuit 1-4
@@ -1927,7 +1947,7 @@ HEATRONIC_timeDiff($) {
 		   current desired flow-temperatur for heating circuit 1-2
 		 </li><br/>
 	     <li><B>hc1_pump .. hc2_pump</B><br/>
-		   status of circuitpump for heating circuit 1-2
+		   status of circuitpump for heating circuit 1-2 (0=off, 1=running)
 		 </li><br/>
 	     <li><B>dhw_Tdesired</B><br/>
 		   required domestic hot water temperature
@@ -2050,10 +2070,10 @@ HEATRONIC_timeDiff($) {
 		   aktueller Betriebsmodus (0=aus, 1=Heizen, 2=Warmwasser)
 		 </li><br/>
 		 <li><B>ch_code</B><br/>
-		   aktueller Betriebs-Code oder erweiterter Störungs-Code (siehe Heizungs-Anleitung) 
+		   aktueller Betriebs-Code oder erweiterter St&ouml;rungs-Code (siehe Heizungs-Anleitung) 
 		 </li><br/>
-		 <li><B>ch_code</B><br/>
-		   Störungs-Code (siehe Heizungs-Anleitung) 
+		 <li><B>ch_error</B><br/>
+		   St&ouml;rungs-Code (siehe Heizungs-Anleitung) 
 		 </li><br/>
 	     <li><B>ch_burner_fan</B><br/>
 		   Status Brenner-Gebl&auml;se (0=aus, 1=l&auml;uft)
@@ -2101,6 +2121,9 @@ HEATRONIC_timeDiff($) {
 		 <li><B>ch_time</B><br/>
 		   Systemzeit der Heizung
 		 </li><br/>
+	     <li><B>ch_Thdrylic_switch</B><br/>
+		   Temperatur an hydraulischer Weiche (wenn vorhanden)
+		 </li><br/>
 		 
 	     <li><B>hc1_Tdesired .. hc4_Tdesired</B><br/>
 		   ben&ouml;tigte Raumtemperatur Heizkreis 1-4
@@ -2115,7 +2138,7 @@ HEATRONIC_timeDiff($) {
 		   aktuell ben&ouml;tigte Vorlauf-Temperatur Heizkreis 1-2
 		 </li><br/>
 	     <li><B>hc1_pump .. hc2_pump</B><br/>
-		   Status der Heizkreis-Pumpe Heizkreis 1-2
+		   Status der Heizkreis-Pumpe Heizkreis 1-2 (0=aus, 1=l&auml;uft)
 		 </li><br/>
 	     <li><B>dhw_Tdesired</B><br/>
 		   ben&ouml;tigte Warmwasser-Temperatur
