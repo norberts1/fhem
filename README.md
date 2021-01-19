@@ -40,6 +40,9 @@ To get and test new features, the pre-release in this repository will help you.
 - restart the fhem-server with the web-interface button *restart*.
 
 ## Changelog
+### 2021-01-19
+- Reconnection handling added.
+
 ### 2019-01-07
 - Updated *Cxyz-Controller* handling for decoding messages.
 
