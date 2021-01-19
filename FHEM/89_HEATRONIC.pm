@@ -57,6 +57,7 @@
 #               'sol_yield_last_hour' corrected, value now devided by 10.
 #               example corrected 'eventMap' for 'attr Betriebsart.
 #               Html-documentation updated, 'ch_Thdrylic_switch' added.
+#   2021-01-19  Reconnection after disconnection, 'sub HEATRONIC_Ready($)' added.
 ###############################################################################
 #
 #    Importend note:
@@ -143,6 +144,7 @@ sub HEATRONIC_Define($$);
 sub HEATRONIC_Undef($$);
 #sub HEATRONIC_Attr(@);
 sub HEATRONIC_Read($);
+sub HEATRONIC_Ready($);
 sub HEATRONIC_Set($@);
 sub HEATRONIC_WriteHC_Trequested($$);
 sub HEATRONIC_WriteHC_mode($$);
@@ -217,6 +219,7 @@ HEATRONIC_Initialize($)
   $hash->{UndefFn} = "HEATRONIC_Undef";
 #  $hash->{AttrFn}  = "HEATRONIC_Attr";
   $hash->{ReadFn}  = "HEATRONIC_Read";
+  $hash->{ReadyFn} = "HEATRONIC_Ready";
   $hash->{SetFn}   = "HEATRONIC_Set";
   $hash->{AttrList} =
     "do_not_notify:1,0 loglevel:0,1,2,3,4,5,6 " 
@@ -933,7 +936,13 @@ HEATRONIC_Read($)
   }
 }
 
-
+sub
+HEATRONIC_Ready($)
+{
+  my ($hash) = @_;
+ # try to reopen the connection in case the connection is lost
+  return DevIo_OpenDev($hash, 1, "HEATRONIC_DoInit");
+}
 
 sub
 HEATRONIC_Set($@)
